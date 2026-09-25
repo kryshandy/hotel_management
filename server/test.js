@@ -37,7 +37,12 @@ test('empty setup, availability, booking and room service use real persisted dat
  assert.equal(initial.status,200);assert.equal(initial.data.setupRequired,true);assert.deepEqual(initial.data.types,[]);
  assert.equal((await call('GET','/api/admin/state')).status,401);
  const setup=await call('POST','/api/admin/setup',{email:'owner@example.test',password:'secure-password-123'});
- assert.equal(setup.status,201);auth=setup.data.token;
+ assert.equal(setup.status,201);assert.equal(setup.data.user.role,'owner');auth=setup.data.token;const ownerAuth=auth;
+ const staff=await call('POST','/api/admin/staff',{display_name:'Front Desk',email:'desk@example.test',password:'desk-password-123',role:'front_office'});
+ assert.equal(staff.status,201);assert.equal(staff.data.role,'front_office');
+ const staffLogin=await call('POST','/api/admin/login',{email:'desk@example.test',password:'desk-password-123'});assert.equal(staffLogin.status,200);auth=staffLogin.data.token;
+ assert.equal((await call('PUT','/api/admin/settings',{hotel_name:'Forbidden edit'})).status,403);auth=ownerAuth;
+ assert.equal((await call('PUT',`/api/admin/staff/${staff.data.id}`,{active:false})).status,200);
  const initialAdmin=await call('GET','/api/admin/state');
  assert.equal(initialAdmin.status,200);assert.ok(initialAdmin.data.features.some(x=>x.key==='housekeeping'&&x.enabled));
  const bookingRules=await call('PUT','/api/admin/booking-rules',{max_stay_nights:14,require_phone:false,auto_confirm:false});
@@ -48,7 +53,7 @@ test('empty setup, availability, booking and room service use real persisted dat
  const type=(await call('POST','/api/admin/types',{slug:'suite',name:'Suite',max_adults:2,max_children:1,max_guests:3})).data;
  assert.ok(type.id);
  const room1=(await call('POST','/api/admin/rooms',{type_id:type.id,number:'101'})).data;
- await call('POST','/api/admin/rooms',{type_id:type.id,number:'102'});
+ const room2=(await call('POST','/api/admin/rooms',{type_id:type.id,number:'102'})).data;
  assert.equal((await call('POST','/api/admin/rates',{type_id:type.id,start_date:'2027-01-01',end_date:'2028-01-01',nightly_price:150})).status,201);
  assert.equal((await call('POST','/api/admin/rates',{type_id:type.id,start_date:'2027-06-01',end_date:'2027-07-01',nightly_price:180})).status,409);
  const search=await call('GET','/api/public/availability?checkIn=2027-02-01&checkOut=2027-02-03&adults=2&children=0');
@@ -58,6 +63,11 @@ test('empty setup, availability, booking and room service use real persisted dat
  const second=await call('POST','/api/public/reservations',booking);
  const third=await call('POST','/api/public/reservations',booking);
  assert.equal(first.status,201);assert.equal(second.status,201);assert.equal(third.status,409);
+ const firstViewForEdit=await call('GET',`/api/public/reservations/${first.data.token}`);
+ const secondViewForEdit=await call('GET',`/api/public/reservations/${second.data.token}`);
+ assert.equal((await call('PUT',`/api/admin/reservations/${firstViewForEdit.data.reservation.id}`,{room_id:secondViewForEdit.data.reservation.room_id})).status,409);
+ const amended=await call('PUT',`/api/admin/reservations/${firstViewForEdit.data.reservation.id}`,{room_id:room1.id,notes:'Late arrival',status:'confirmed'});
+ assert.equal(amended.status,200);assert.equal(amended.data.reservation.notes,'Late arrival');assert.equal(amended.data.reservation.status,'confirmed');
  const otherType=(await call('POST','/api/admin/types',{slug:'double',name:'Double',max_adults:2,max_guests:2})).data;
  assert.equal((await call('PUT',`/api/admin/rooms/${room1.id}`,{type_id:otherType.id})).status,409);
  assert.equal((await call('POST','/api/admin/blocks',{room_id:room1.id,start_date:'2027-02-01',end_date:'2027-02-02'})).status,409);

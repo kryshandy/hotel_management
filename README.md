@@ -56,6 +56,8 @@ Set `ADMIN_SETUP_KEY` to a long random secret before exposing a new installation
 - Guest preferences can be recorded as service-team or manager-only knowledge and archived without losing history.
 - Editorial sections let administrators compose, order, publish, or unpublish additional guest-site stories without changing code.
 - Departments provide routing destinations for guest requests, which also support priority, assignment, requested time, internal notes, and completion tracking.
+- Leadership can create individual staff accounts across owner, manager, front-office, housekeeping, concierge, engineering, revenue, and viewer roles; accounts can be deactivated without erasing their audit history.
+- Reservations can be amended from the back office with safe date, occupancy, status, and physical-room changes. Every amendment rechecks blocks, engineering outages, rate coverage, capacity, and overlapping stays inside a write transaction.
 
 All stay dates use `YYYY-MM-DD`. Booking check-in cannot be in the past in the property's configured time zone. Date-range end values are exclusive. Reservation estimates are saved at booking time so later rate changes do not rewrite existing reservations.
 
@@ -89,6 +91,7 @@ Administrator routes:
 | GET | `/api/admin/audit` | Review recent administrator changes |
 | PUT | `/api/admin/features/:key` | Activate or deactivate a module |
 | PUT | `/api/admin/booking-rules` | Update reservation rules |
+| POST, PUT | `/api/admin/staff` | Create and manage staff access |
 | GET, POST, PUT, DELETE | `/api/admin/{departments,housekeeping,maintenance,preferences,sections}` | Manage operations and content |
 
 Administrator routes after setup require `Authorization: Bearer <token>`. JSON errors use `{ "error": "message" }`. Login, setup, reservations, and service requests have per-IP rate limits and respond with `429` plus `Retry-After` when exceeded.

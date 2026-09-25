@@ -207,10 +207,12 @@ function availableTypes(start,end,adults,children) {
 const bearer = req => { const h=req.headers.authorization||''; return h.startsWith('Bearer ')?h.slice(7):null; };
 function currentUser(req) {
  const value=bearer(req); if (!value) return null;
- const s=one(`SELECT a.id,a.email,s.expires_at FROM sessions s JOIN admins a ON a.id=s.admin_id WHERE s.token_hash=?`,hash(value));
- return s && Date.parse(s.expires_at)>Date.now()?{id:s.id,email:s.email}:null;
+ const s=one(`SELECT a.id,a.email,a.display_name,a.role,a.active,s.expires_at FROM sessions s JOIN admins a ON a.id=s.admin_id WHERE s.token_hash=?`,hash(value));
+ return s && s.active && Date.parse(s.expires_at)>Date.now()?{id:s.id,email:s.email,display_name:s.display_name,role:s.role}:null;
 }
 function requireAdmin(req) {const user=currentUser(req);if(!user)fail(401,'Sign in required');return user;}
+function requireLeadership(admin){if(!['owner','manager'].includes(admin.role))fail(403,'Leadership access required');}
+function requireRoles(admin,roles){if(!['owner','manager'].includes(admin.role)&&!roles.includes(admin.role))fail(403,'Your role cannot perform this action');}
 const publicSite = () => ({settings:settings(),features:features(),bookingRules:bookingRules(),types:all('SELECT * FROM accommodation_types WHERE active=1 ORDER BY sort_order,id').map(exposeType),services:featureOn('service_catalog')?all('SELECT * FROM services WHERE active=1 ORDER BY sort_order,id').map(exposeService):[],sections:all('SELECT * FROM content_sections WHERE enabled=1 ORDER BY sort_order,id').map(x=>({...x,enabled:bool(x.enabled)})),setupRequired:!one('SELECT id FROM admins LIMIT 1'),setupKeyRequired:!!process.env.ADMIN_SETUP_KEY});
 const adminState = () => {
  const types=all('SELECT * FROM accommodation_types ORDER BY sort_order,id').map(exposeType);
@@ -224,7 +226,8 @@ const adminState = () => {
  const maintenance=all(`SELECT m.*,rm.number room_number FROM maintenance_tickets m LEFT JOIN rooms rm ON rm.id=m.room_id ORDER BY CASE m.priority WHEN 'critical' THEN 1 WHEN 'high' THEN 2 WHEN 'normal' THEN 3 ELSE 4 END,m.id DESC`).map(x=>({...x,out_of_order:bool(x.out_of_order)}));
  const preferences=all(`SELECT p.*,g.name guest_name,g.email guest_email FROM guest_preferences p JOIN guests g ON g.id=p.guest_id ORDER BY p.updated_at DESC,p.id DESC`).map(x=>({...x,active:bool(x.active)}));
  const sections=all('SELECT * FROM content_sections ORDER BY sort_order,id').map(x=>({...x,enabled:bool(x.enabled)}));
- return {settings:settings(),features:featureCatalog(),bookingRules:bookingRules(),types,rooms,rates,blocks,services,reservations:res,requests:req,guests,departments,housekeeping,maintenance,preferences,sections,
+ const staff=all('SELECT id,email,display_name,role,active,created_at FROM admins ORDER BY active DESC,display_name,email').map(x=>({...x,active:bool(x.active)}));
+ return {settings:settings(),features:featureCatalog(),bookingRules:bookingRules(),types,rooms,rates,blocks,services,reservations:res,requests:req,guests,departments,housekeeping,maintenance,preferences,sections,staff,
    overview:{types:types.length,rooms:rooms.length,active_rooms:rooms.filter(x=>x.status==='active').length,
     reservations:res.length,pending_reservations:res.filter(x=>x.status==='pending').length,
     checked_in:res.filter(x=>x.status==='checked_in').length,open_requests:req.filter(x=>x.status==='open'||x.status==='in_progress').length,
@@ -454,7 +457,7 @@ function checkLeadTime(start,rules) {
 function createSession(admin) {
  const value=token(), expires=new Date(Date.now()+7*86400000).toISOString();
  run('INSERT INTO sessions(token_hash,admin_id,expires_at) VALUES(?,?,?)',hash(value),admin.id,expires);
- return {user:{id:admin.id,email:admin.email},token:value};
+ return {user:{id:admin.id,email:admin.email,display_name:admin.display_name||'',role:admin.role||'owner'},token:value};
 }
 function reserve(b) {
  if(!featureOn('public_booking')||!settings().booking_enabled || settings().demo_mode)fail(409,'Online reservations are currently paused');
@@ -541,17 +544,32 @@ async function api(req,res,url) {
  }
  if(method==='POST'&&p==='/api/admin/logout') {const value=bearer(req);if(value)run('DELETE FROM sessions WHERE token_hash=?',hash(value));return respond(res,200,{ok:true});}
  const admin=requireAdmin(req);
- if(method==='POST'&&p==='/api/admin/media'){if(!featureOn('media_library'))fail(409,'Media uploads are disabled');return respond(res,201,await uploadMedia(admin,await body(req,7*1024*1024+1024)));}
+ if(method==='POST'&&p==='/api/admin/media'){requireRoles(admin,['revenue']);if(!featureOn('media_library'))fail(409,'Media uploads are disabled');return respond(res,201,await uploadMedia(admin,await body(req,7*1024*1024+1024)));}
  if(method==='GET'&&p==='/api/admin/state')return respond(res,200,adminState());
  if(method==='GET'&&p==='/api/admin/overview')return respond(res,200,adminState().overview);
- if(method==='GET'&&p==='/api/admin/audit')return respond(res,200,{audit:all('SELECT a.id,a.action,a.entity,a.entity_id,a.before_json,a.after_json,a.created_at,u.email admin_email FROM audit_log a JOIN admins u ON u.id=a.admin_id ORDER BY a.id DESC LIMIT 200')});
+ if(method==='GET'&&p==='/api/admin/audit'){requireLeadership(admin);return respond(res,200,{audit:all('SELECT a.id,a.action,a.entity,a.entity_id,a.before_json,a.after_json,a.created_at,u.email admin_email FROM audit_log a JOIN admins u ON u.id=a.admin_id ORDER BY a.id DESC LIMIT 200')});}
  if(method==='GET'&&p==='/api/admin/settings')return respond(res,200,settings());
- if(method==='PUT'&&p==='/api/admin/settings'){const b=await body(req);const after=atomic(()=>{const before=settings(),next=updateSettings(b);audit(admin,'update','settings',1,before,next);return next;});return respond(res,200,after);}
- if(method==='PUT'&&p==='/api/admin/booking-rules'){const b=await body(req);const after=atomic(()=>{const before=bookingRules(),next=updateBookingRules(b);audit(admin,'update','booking_rules',1,before,next);return next;});return respond(res,200,after);}
+ if(method==='PUT'&&p==='/api/admin/settings'){requireLeadership(admin);const b=await body(req);const after=atomic(()=>{const before=settings(),next=updateSettings(b);audit(admin,'update','settings',1,before,next);return next;});return respond(res,200,after);}
+ if(method==='PUT'&&p==='/api/admin/booking-rules'){requireLeadership(admin);const b=await body(req);const after=atomic(()=>{const before=bookingRules(),next=updateBookingRules(b);audit(admin,'update','booking_rules',1,before,next);return next;});return respond(res,200,after);}
  m=p.match(/^\/api\/admin\/features\/([a-z0-9_-]+)$/);
- if(method==='PUT'&&m){const key=m[1],b=await body(req),before=one('SELECT * FROM feature_flags WHERE key=?',key);if(!before)fail(404,'Feature not found');const enabled=boolean(b.enabled,'enabled');const after=atomic(()=>{run('UPDATE feature_flags SET enabled=? WHERE key=?',enabled,key);const next=one('SELECT * FROM feature_flags WHERE key=?',key);audit(admin,'toggle','feature',null,before,next);return {...next,enabled:bool(next.enabled)};});return respond(res,200,after);}
+ if(method==='PUT'&&m){requireLeadership(admin);const key=m[1],b=await body(req),before=one('SELECT * FROM feature_flags WHERE key=?',key);if(!before)fail(404,'Feature not found');const enabled=boolean(b.enabled,'enabled');const after=atomic(()=>{run('UPDATE feature_flags SET enabled=? WHERE key=?',enabled,key);const next=one('SELECT * FROM feature_flags WHERE key=?',key);audit(admin,'toggle','feature',null,before,next);return {...next,enabled:bool(next.enabled)};});return respond(res,200,after);}
+ if(method==='POST'&&p==='/api/admin/staff'){
+  requireLeadership(admin);const b=await body(req),email=text(b.email,'email',254,true).toLowerCase(),password=text(b.password,'password',200,true),displayName=text(b.display_name??'','display name',160);
+  if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)||password.length<12)fail(400,'Valid email and password of at least 12 characters required');
+  const role=text(b.role??'viewer','role',30,true);if(!['owner','manager','front_office','housekeeping','concierge','engineering','revenue','viewer'].includes(role))fail(400,'Invalid role');
+  const result=atomic(()=>{const salt=randomBytes(16).toString('hex'),digest=scryptSync(password,salt,64).toString('hex');let staffId;try{staffId=Number(run('INSERT INTO admins(email,password_hash,display_name,role) VALUES(?,?,?,?)',email,`${salt}:${digest}`,displayName,role).lastInsertRowid);}catch(e){if(e.message.includes('UNIQUE'))fail(409,'A staff account with this email already exists');throw e;}const next=one('SELECT id,email,display_name,role,active,created_at FROM admins WHERE id=?',staffId);audit(admin,'create','staff',staffId,null,next);return {...next,active:bool(next.active)};});return respond(res,201,result);
+ }
+ m=p.match(/^\/api\/admin\/staff\/(\d+)$/);
+ if(method==='PUT'&&m){
+  requireLeadership(admin);const staffId=id(m[1]),b=await body(req),before=one('SELECT id,email,display_name,role,active,created_at FROM admins WHERE id=?',staffId);if(!before)fail(404,'Staff account not found');const data={};
+  for(const [k,v] of Object.entries(b)){if(k==='display_name')data.display_name=text(v,'display name',160);else if(k==='role'){data.role=text(v,'role',30,true);if(!['owner','manager','front_office','housekeeping','concierge','engineering','revenue','viewer'].includes(data.role))fail(400,'Invalid role');}else if(k==='active')data.active=boolean(v,'active');else if(k==='password'){const password=text(v,'password',200,true);if(password.length<12)fail(400,'Password must be at least 12 characters');const salt=randomBytes(16).toString('hex');data.password_hash=`${salt}:${scryptSync(password,salt,64).toString('hex')}`;}else fail(400,`Unknown field ${k}`);}
+  if(staffId===admin.id&&(data.active===0||data.role&&!['owner','manager'].includes(data.role)))fail(409,'You cannot remove your own leadership access');
+  if(before.role==='owner'&&(data.active===0||data.role&&data.role!=='owner')&&one("SELECT COUNT(*) count FROM admins WHERE role='owner' AND active=1 AND id!=?",staffId).count===0)fail(409,'At least one active owner is required');
+  const after=atomic(()=>{const keys=Object.keys(data);if(keys.length)run(`UPDATE admins SET ${keys.map(k=>`${k}=?`).join(',')} WHERE id=?`,...keys.map(k=>data[k]),staffId);if(data.active===0)run('DELETE FROM sessions WHERE admin_id=?',staffId);const next=one('SELECT id,email,display_name,role,active,created_at FROM admins WHERE id=?',staffId);audit(admin,'update','staff',staffId,before,next);return {...next,active:bool(next.active)};});return respond(res,200,after);
+ }
  m=p.match(/^\/api\/admin\/guests\/(\d+)$/);
  if(method==='PUT'&&m) {
+   requireRoles(admin,['front_office']);
   const guestId=id(m[1]),b=await body(req),data={};
   for(const [k,v] of Object.entries(b)){
    if(k==='name')data.name=text(v,'name',160,true);
@@ -565,26 +583,40 @@ async function api(req,res,url) {
  }
  m=p.match(/^\/api\/admin\/(types|rooms|rates|blocks|services|departments|housekeeping|maintenance|preferences|sections)(?:\/(\d+))?$/);
  if(m) {
-  const entity=m[1],itemId=m[2]?id(m[2]):null,table=tables[entity];
+   const entity=m[1],itemId=m[2]?id(m[2]):null,table=tables[entity];
   if(method==='GET'&&!itemId){const xs=all(`SELECT * FROM ${table} ORDER BY id DESC`);return respond(res,200,{[entity]:xs.map(x=>entity==='types'?exposeType(x):entity==='services'?exposeService(x):x)});}
   if(method==='GET'&&itemId){const x=row(table,itemId);if(!x)fail(404,'Record not found');return respond(res,200,entity==='types'?exposeType(x):entity==='services'?exposeService(x):x);}
-  if(method==='POST'&&!itemId){const b=await body(req);const after=atomic(()=>{const next=saveEntity(entity,b);audit(admin,'create',entity,next.id,null,next);return next;});return respond(res,201,after);}
-  if(method==='PUT'&&itemId){const b=await body(req);const after=atomic(()=>{const before=row(table,itemId),next=saveEntity(entity,b,itemId);audit(admin,'update',entity,itemId,before,next);return next;});return respond(res,200,after);}
-  if(method==='DELETE'&&itemId){atomic(()=>{const before=row(table,itemId);deleteEntity(entity,itemId);audit(admin,'delete',entity,itemId,before,null);});return respond(res,200,{ok:true});}
+   const permitted={types:['revenue'],rooms:['revenue'],rates:['revenue'],blocks:['revenue','front_office'],services:['concierge'],departments:[],housekeeping:['housekeeping','front_office'],maintenance:['engineering','front_office'],preferences:['front_office','concierge'],sections:['revenue']}[entity];
+   if(method==='POST'&&!itemId){requireRoles(admin,permitted);const b=await body(req);const after=atomic(()=>{const next=saveEntity(entity,b);audit(admin,'create',entity,next.id,null,next);return next;});return respond(res,201,after);}
+   if(method==='PUT'&&itemId){requireRoles(admin,permitted);const b=await body(req);const after=atomic(()=>{const before=row(table,itemId),next=saveEntity(entity,b,itemId);audit(admin,'update',entity,itemId,before,next);return next;});return respond(res,200,after);}
+   if(method==='DELETE'&&itemId){requireRoles(admin,permitted);atomic(()=>{const before=row(table,itemId);deleteEntity(entity,itemId);audit(admin,'delete',entity,itemId,before,null);});return respond(res,200,{ok:true});}
  }
  if(method==='GET'&&p==='/api/admin/reservations')return respond(res,200,{reservations:reservations()});
  m=p.match(/^\/api\/admin\/reservations\/(\d+)$/);
  if(method==='PUT'&&m) {
-  const itemId=id(m[1]),b=await body(req),x=row('reservations',itemId);if(!x)fail(404,'Reservation not found');
-  const status=text(b.status,'status',30,true);if(!['pending','confirmed','checked_in','checked_out','cancelled','no_show'].includes(status))fail(400,'Invalid status');
-  const transitions={pending:['confirmed','cancelled','no_show'],confirmed:['checked_in','cancelled','no_show'],checked_in:['checked_out'],checked_out:[],cancelled:[],no_show:[]};
-  if(status!==x.status&&!transitions[x.status].includes(status))fail(409,'Invalid reservation status transition');
-  const after=atomic(()=>{run('UPDATE reservations SET status=?,updated_at=CURRENT_TIMESTAMP WHERE id=?',status,itemId);
-   const next=reservations().find(y=>y.id===itemId);audit(admin,'status','reservation',itemId,x,next);return next;});return respond(res,200,{reservation:after});
+   requireRoles(admin,['front_office']);
+   const itemId=id(m[1]),b=await body(req);
+   for(const key of Object.keys(b))if(!['status','room_id','check_in','check_out','adults','children','notes'].includes(key))fail(400,`Unknown field ${key}`);
+   const after=atomic(()=>{const x=row('reservations',itemId);if(!x)fail(404,'Reservation not found');const data={};
+    if('status' in b){const status=text(b.status,'status',30,true);if(!['pending','confirmed','checked_in','checked_out','cancelled','no_show'].includes(status))fail(400,'Invalid status');const transitions={pending:['confirmed','cancelled','no_show'],confirmed:['checked_in','cancelled','no_show'],checked_in:['checked_out'],checked_out:[],cancelled:[],no_show:[]};if(status!==x.status&&!transitions[x.status].includes(status))fail(409,'Invalid reservation status transition');data.status=status;}
+    const start='check_in' in b?date(b.check_in,'check-in'):x.check_in,end='check_out' in b?date(b.check_out,'check-out'):x.check_out;
+    const span=dates(start,end,bookingRules().max_stay_nights);const type=row('accommodation_types',x.type_id);
+    const adults='adults' in b?integer(b.adults,'adults',1,30):x.adults,children='children' in b?integer(b.children,'children',0,30):x.children;
+    if(adults>type.max_adults||children>type.max_children||adults+children>type.max_guests)fail(400,'Party exceeds room capacity');
+    const roomId='room_id' in b?id(b.room_id):x.room_id,room=row('rooms',roomId);if(!room||room.type_id!==x.type_id)fail(400,'Room must belong to the reserved accommodation type');
+    if(roomId!==x.room_id&&room.status!=='active')fail(409,'Selected room is not active');
+    if(one('SELECT id FROM blocks WHERE room_id=? AND start_date<? AND end_date>? LIMIT 1',roomId,span.end,span.start))fail(409,'Selected room is blocked for these dates');
+    if(one(`SELECT id FROM maintenance_tickets WHERE room_id=? AND out_of_order=1 AND status NOT IN ('resolved','cancelled') LIMIT 1`,roomId))fail(409,'Selected room is out of order');
+    if(one(`SELECT id FROM reservations WHERE room_id=? AND id!=? AND status IN ('pending','confirmed','checked_in') AND check_in<? AND check_out>? LIMIT 1`,roomId,itemId,span.end,span.start))fail(409,'Selected room is already reserved for these dates');
+    if(start!==x.check_in||end!==x.check_out){const q=quote(x.type_id,start,end);if(!q)fail(409,'No rate covers the amended stay');data.quoted_total=q.quoted_total;}
+    Object.assign(data,{room_id:roomId,check_in:start,check_out:end,adults,children});if('notes' in b)data.notes=text(b.notes??'','notes',3000);
+    const keys=Object.keys(data);run(`UPDATE reservations SET ${keys.map(k=>`${k}=?`).join(',')},updated_at=CURRENT_TIMESTAMP WHERE id=?`,...keys.map(k=>data[k]),itemId);
+    const next=reservations().find(y=>y.id===itemId);audit(admin,'update','reservation',itemId,x,next);return next;});return respond(res,200,{reservation:after});
  }
  if(method==='GET'&&p==='/api/admin/requests')return respond(res,200,{requests:requests()});
  m=p.match(/^\/api\/admin\/requests\/(\d+)$/);
  if(method==='PUT'&&m) {
+   requireRoles(admin,['front_office','concierge']);
    const itemId=id(m[1]),b=await body(req),x=row('service_requests',itemId);if(!x)fail(404,'Request not found');
    const data={};
    for(const [k,v] of Object.entries(b)){
