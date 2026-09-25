@@ -189,8 +189,9 @@ function quote(typeId, start, end) {
 }
 function availableRooms(typeId,start,end) {
  return all(`SELECT rm.* FROM rooms rm WHERE rm.type_id=? AND rm.status='active'
- AND NOT EXISTS(SELECT 1 FROM blocks b WHERE b.room_id=rm.id AND b.start_date<? AND b.end_date>?)
- AND NOT EXISTS(SELECT 1 FROM reservations r WHERE r.room_id=rm.id AND r.status IN ('pending','confirmed','checked_in') AND r.check_in<? AND r.check_out>?)
+  AND NOT EXISTS(SELECT 1 FROM blocks b WHERE b.room_id=rm.id AND b.start_date<? AND b.end_date>?)
+  AND NOT EXISTS(SELECT 1 FROM maintenance_tickets m WHERE m.room_id=rm.id AND m.out_of_order=1 AND m.status NOT IN ('resolved','cancelled'))
+  AND NOT EXISTS(SELECT 1 FROM reservations r WHERE r.room_id=rm.id AND r.status IN ('pending','confirmed','checked_in') AND r.check_in<? AND r.check_out>?)
  ORDER BY rm.id`,typeId,end,start,end,start);
 }
 function availableTypes(start,end,adults,children) {
@@ -384,6 +385,7 @@ function normalize(entity,b,existing={}) {
   out.status=text(x.status??'open','status',30,true);if(!['open','assigned','in_progress','on_hold','resolved','cancelled'].includes(out.status))fail(400,'Invalid status');
   out.out_of_order=bool(x.out_of_order??false)?1:0;out.assigned_to=text(x.assigned_to??'','assigned to',160);
   out.due_at=x.due_at?date(x.due_at,'due date'):null;
+  out.resolved_at=out.status==='resolved'?(existing.resolved_at||new Date().toISOString()):null;
  }
  if(entity==='preferences') {
   out.guest_id=id(x.guest_id);if(!row('guests',out.guest_id))fail(400,'Unknown guest');
@@ -407,8 +409,9 @@ function saveEntity(entity,b,itemId) {
  const existing=old?{...old,amenities:entity==='types'?JSON.parse(old.amenities):undefined,images:entity==='types'?JSON.parse(old.images):undefined}:{};
  const data=normalize(entity,b,existing);const keys=Object.keys(data);
  try {
-  if(itemId)run(`UPDATE ${table} SET ${keys.map(k=>`${k}=?`).join(',')} WHERE id=?`,...keys.map(k=>data[k]),itemId);
-  else itemId=Number(run(`INSERT INTO ${table} (${keys.join(',')}) VALUES (${keys.map(()=>'?').join(',')})`,...keys.map(k=>data[k])).lastInsertRowid);
+   if(itemId)run(`UPDATE ${table} SET ${keys.map(k=>`${k}=?`).join(',')} WHERE id=?`,...keys.map(k=>data[k]),itemId);
+   else itemId=Number(run(`INSERT INTO ${table} (${keys.join(',')}) VALUES (${keys.map(()=>'?').join(',')})`,...keys.map(k=>data[k])).lastInsertRowid);
+   if(['housekeeping','maintenance','preferences'].includes(entity))run(`UPDATE ${table} SET updated_at=CURRENT_TIMESTAMP WHERE id=?`,itemId);
  } catch(e) {if(e.message.includes('UNIQUE'))fail(409,'A record with this unique value already exists');throw e;}
  const result=row(table,itemId);return entity==='types'?exposeType(result):entity==='services'?exposeService(result):['departments','preferences','sections'].includes(entity)?{...result,[entity==='sections'?'enabled':'active']:bool(result[entity==='sections'?'enabled':'active'])}:entity==='maintenance'?{...result,out_of_order:bool(result.out_of_order)}:result;
 }

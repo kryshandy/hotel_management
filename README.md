@@ -1,6 +1,6 @@
 # Hotel Management
 
-A hotel website and operations console for accommodation, availability, reservations, guests, and room service requests. It stores data locally in SQLite. It displays room rates and reservation estimates but does not collect payments or manage a financial ledger.
+A configurable hotel website and operations command centre for accommodation, availability, reservations, guest recognition, service delivery, housekeeping, and engineering. It stores data locally in SQLite. It displays room rates and reservation estimates but does not collect payments or manage a financial ledger.
 
 ## Requirements
 
@@ -49,6 +49,13 @@ Set `ADMIN_SETUP_KEY` to a long random secret before exposing a new installation
 - Administrators manage reservation and request statuses in the console.
 - Site settings control property text, brand colors, navigation labels, section headings, and visibility for About and Contact sections.
 - Customer records keep reservation history linked while allowing administrators to correct guest contact details.
+- Feature switches let the property activate or deactivate guest experience, operations, revenue, content, and governance modules. Disabled modules leave the back-office navigation; public booking and guest-service switches are also enforced by the API.
+- Booking rules control the booking horizon, maximum stay, lead time, required phone number, children, special requests, confirmation mode, and cancellation-policy window.
+- Housekeeping tasks cover arrival preparation, departure cleaning, stayover service, turndown, inspection, deep cleaning, priority, assignment, and status.
+- Engineering tickets track priority, ownership, due dates, and inventory impact. An unresolved out-of-order ticket automatically removes its room from availability.
+- Guest preferences can be recorded as service-team or manager-only knowledge and archived without losing history.
+- Editorial sections let administrators compose, order, publish, or unpublish additional guest-site stories without changing code.
+- Departments provide routing destinations for guest requests, which also support priority, assignment, requested time, internal notes, and completion tracking.
 
 All stay dates use `YYYY-MM-DD`. Booking check-in cannot be in the past in the property's configured time zone. Date-range end values are exclusive. Reservation estimates are saved at booking time so later rate changes do not rewrite existing reservations.
 
@@ -80,9 +87,28 @@ Administrator routes:
 | PUT | `/api/admin/reservations/:id` | Update reservation status |
 | PUT | `/api/admin/requests/:id` | Update service request status |
 | GET | `/api/admin/audit` | Review recent administrator changes |
+| PUT | `/api/admin/features/:key` | Activate or deactivate a module |
+| PUT | `/api/admin/booking-rules` | Update reservation rules |
+| GET, POST, PUT, DELETE | `/api/admin/{departments,housekeeping,maintenance,preferences,sections}` | Manage operations and content |
 
 Administrator routes after setup require `Authorization: Bearer <token>`. JSON errors use `{ "error": "message" }`. Login, setup, reservations, and service requests have per-IP rate limits and respond with `429` plus `Retry-After` when exceeded.
 
 ### Image uploads
 
 Send JSON to `POST /api/admin/media` with `filename`, `mime_type`, and raw `data_base64` (without a data URL prefix). Only PNG, JPEG, and WebP files up to 5 MiB are accepted. The server validates file signatures, stores them with random names under `public/uploads/`, and returns `{ "url": "/uploads/…" }`. Paste or select that URL for a property logo, hero image, or accommodation image. Uploaded files are local data and are excluded from Git; include `public/uploads/` in backups alongside the SQLite database.
+
+## Database migrations and rollback
+
+The server applies versioned SQL migrations from `database/migrations/` during startup and records each applied version in `schema_migrations`. Every migration includes a matching down migration.
+
+```sh
+npm run migrate:status
+npm run migrate:up
+npm run migrate:down
+```
+
+`migrate:down` rolls back one version and is intended for controlled recovery. Back up the SQLite database and its WAL files before rolling back a live property. Test migrations against a recent backup before production deployment.
+
+## Operational scope
+
+The application is designed for one independently operated property with modest concurrent traffic. SQLite write transactions protect room allocation and operational changes, but the deployment should run as one application instance against local persistent storage. Multi-property groups, horizontal scaling, online payments, accounting, payroll, point-of-sale, and channel-manager distribution require additional services and are not implied by this release.

@@ -26,7 +26,7 @@ test('demo seed is idempotent, contains no private data, and removes cleanly', a
  assert.equal(count(db, 'rooms'), 12);
  assert.equal(count(db, 'rates'), 6);
  assert.equal(count(db, 'services'), 6);
- for (const table of ['admins', 'sessions', 'guests', 'reservations', 'service_requests', 'audit_log'])
+ for (const table of ['admins', 'sessions', 'guests', 'reservations', 'service_requests', 'housekeeping_tasks', 'maintenance_tickets', 'guest_preferences', 'audit_log'])
   assert.equal(count(db, table), 0, table);
  const settings = db.prepare('SELECT * FROM settings WHERE id=1').get();
  assert.equal(settings.hotel_name, 'Maison Wouri (Demo)');

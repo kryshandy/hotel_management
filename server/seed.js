@@ -119,6 +119,10 @@ export function removeSeed(db) {
    throw new Error('Cannot remove demo data: a reservation references a seeded room or type.');
   if (has('SELECT id FROM blocks WHERE room_id IN (IDS) LIMIT 1', roomIds))
    throw new Error('Cannot remove demo data: an availability block references a seeded room.');
+  if (has('SELECT id FROM housekeeping_tasks WHERE room_id IN (IDS) LIMIT 1', roomIds))
+   throw new Error('Cannot remove demo data: a housekeeping task references a seeded room.');
+  if (has('SELECT id FROM maintenance_tickets WHERE room_id IN (IDS) LIMIT 1', roomIds))
+   throw new Error('Cannot remove demo data: a maintenance ticket references a seeded room.');
   if (has('SELECT id FROM service_requests WHERE service_id IN (IDS) LIMIT 1', serviceIds))
    throw new Error('Cannot remove demo data: a service request references a seeded service.');
   if (typeIds.length && one(db, `SELECT id FROM rooms WHERE type_id IN (${typeIds.map(() => '?').join(',')}) AND id NOT IN (${roomIds.map(() => '?').join(',')}) LIMIT 1`, ...typeIds, ...roomIds))
@@ -187,7 +191,7 @@ async function execute(command) {
   try {
    result = command === 'remove' ? removeSeed(db) : applySeed(db);
    if (command === 'snapshot') {
-    for (const table of ['admins', 'sessions', 'guests', 'reservations', 'service_requests', 'audit_log'])
+    for (const table of ['admins', 'sessions', 'guests', 'reservations', 'service_requests', 'housekeeping_tasks', 'maintenance_tickets', 'guest_preferences', 'audit_log'])
      if (one(db, `SELECT COUNT(*) AS count FROM ${table}`).count) throw new Error(`Snapshot contains private or operational ${table} data`);
     db.exec('PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE; VACUUM;');
    }
