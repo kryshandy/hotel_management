@@ -4,6 +4,7 @@ import { randomBytes, createHash, scryptSync, timingSafeEqual } from 'node:crypt
 import { readFile, stat, mkdir, writeFile, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { applyMigrations } from './migrations.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const publicDir = path.join(root, 'public');
@@ -102,6 +103,7 @@ const additionalSettings={
 };
 const knownSettings=new Set(db.prepare('PRAGMA table_info(settings)').all().map(x=>x.name));
 for(const [name,definition] of Object.entries(additionalSettings))if(!knownSettings.has(name))db.exec(`ALTER TABLE settings ADD COLUMN ${name} ${definition}`);
+applyMigrations(db);
 
 class ApiError extends Error { constructor(status, message, details) { super(message); this.status = status; this.details = details; } }
 const fail = (status, message, details) => { throw new ApiError(status, message, details); };

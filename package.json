@@ -11,6 +11,9 @@
     "dev": "node --watch server/index.js",
     "check": "node --check server/index.js && node --check public/app.js",
     "test": "node --test server/test.js server/seed.test.js",
+    "migrate:status": "node server/migrate.js status",
+    "migrate:up": "node server/migrate.js up",
+    "migrate:down": "node server/migrate.js down",
     "seed:apply": "node server/seed.js apply",
     "seed:remove": "node server/seed.js remove",
     "seed:snapshot": "node server/seed.js snapshot"
