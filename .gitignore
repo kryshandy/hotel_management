@@ -1,0 +1,9 @@
+node_modules/
+*.sqlite
+!database/demo.sqlite
+*.sqlite-shm
+*.sqlite-wal
+.env
+.env.*
+!.env.example
+public/uploads/
