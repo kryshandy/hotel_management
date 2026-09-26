@@ -17,6 +17,31 @@ Open `http://localhost:3000`. Visit `/admin` to create the first administrator, 
 
 The default database is `hotel.sqlite` in the project root. Set `PORT` and `DB_PATH` as environment variables to change the listening port and database location. `npm run dev` restarts the server when its code changes. `npm test` runs API integration tests against a temporary database.
 
+`UPLOAD_DIR` optionally moves uploaded property media outside `public/uploads`. This is useful when the database and uploads need to share persistent storage on a hosting platform.
+
+## Deploy on Railway with SQLite
+
+Deploy the GitHub repository as one Railway service. Railway detects the Node.js application and runs `npm start`; it also provides `PORT` automatically.
+
+SQLite and uploaded media must live on persistent storage. Attach one Railway Volume to the service with mount path `/data`, then add these service variables in Railway's **Variables** tab:
+
+```env
+NODE_ENV=production
+DB_PATH=/data/hotel.sqlite
+UPLOAD_DIR=/data/uploads
+ADMIN_SETUP_KEY=replace-with-a-long-random-secret
+```
+
+Generate `ADMIN_SETUP_KEY` locally instead of committing it. In PowerShell:
+
+```powershell
+[Convert]::ToHexString([Security.Cryptography.RandomNumberGenerator]::GetBytes(32)).ToLower()
+```
+
+In the Railway service settings, generate a public domain and set the healthcheck path to `/health`. Keep a single replica: this application uses one local SQLite database and is intentionally not horizontally scaled. After the deployment becomes healthy, open `https://your-domain.up.railway.app/admin`, enter the setup key from Railway, and create the first administrator. The setup key is only used for that initial administrator creation.
+
+Back up the attached volume from Railway on a schedule. A service with a volume can have brief downtime during deployment because Railway does not mount the same volume to two active deployments simultaneously.
+
 ## Optional demonstration data
 
 The repository includes a fictional Douala property, **Maison Wouri (Demo)**, for exploring the website and admin console. Its six accommodation categories, twelve physical rooms, six guest services, and XAF rates are illustrative. It is not a real hotel, and no guest, administrator, reservation, token, or payment data is included. The rates cover stays from 2026-09-17 through 2028-09-16; rate end dates are exclusive. Online booking is disabled for the demo until a real property enables it in the admin settings.

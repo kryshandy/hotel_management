@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import net from 'node:net';
@@ -12,11 +12,14 @@ async function freePort() {
 }
 
 test('settings, public DTOs, sessions and role boundaries are enforced',async t=>{
- const dir=await mkdtemp(join(tmpdir(),'hotel-security-')),port=await freePort();
- const child=spawn(process.execPath,['server/index.js'],{cwd:new URL('..',import.meta.url),env:{...process.env,PORT:String(port),DB_PATH:join(dir,'test.sqlite')},stdio:'ignore'});
+ const dir=await mkdtemp(join(tmpdir(),'hotel-security-')),uploads=join(dir,'uploads'),port=await freePort();
+ await mkdir(uploads);await writeFile(join(uploads,'volume-probe.txt'),'persistent media');
+ const child=spawn(process.execPath,['server/index.js'],{cwd:new URL('..',import.meta.url),env:{...process.env,PORT:String(port),DB_PATH:join(dir,'data','test.sqlite'),UPLOAD_DIR:uploads},stdio:'ignore'});
  t.after(async()=>{child.kill();await new Promise(resolve=>child.once('exit',resolve));await rm(dir,{recursive:true,force:true});});
  const base=`http://127.0.0.1:${port}`;
  for(let i=0;i<50;i++){try{await fetch(`${base}/api/public/site`);break;}catch{await new Promise(resolve=>setTimeout(resolve,100));}}
+ const health=await fetch(`${base}/health`);assert.equal(health.status,200);assert.deepEqual(await health.json(),{status:'ok'});
+ const persistedMedia=await fetch(`${base}/uploads/volume-probe.txt`);assert.equal(persistedMedia.status,200);assert.equal(await persistedMedia.text(),'persistent media');
  const call=async(method,path,data,token)=>{const response=await fetch(base+path,{method,headers:{'Content-Type':'application/json',...(token?{Authorization:`Bearer ${token}`}:{})},body:data===undefined?undefined:JSON.stringify(data)});return {status:response.status,data:await response.json()};};
 
  const setup=await call('POST','/api/admin/setup',{email:'owner@example.test',password:'owner-password-123'}),ownerToken=setup.data.token,ownerId=setup.data.user.id;

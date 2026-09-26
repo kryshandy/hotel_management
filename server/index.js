@@ -10,7 +10,10 @@ import { localDateTimeToEpoch } from './time.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const publicDir = path.join(root, 'public');
-const db = new DatabaseSync(process.env.DB_PATH || path.join(root, 'hotel.sqlite'));
+const dbPath = path.resolve(process.env.DB_PATH || path.join(root, 'hotel.sqlite'));
+const uploadDir = path.resolve(process.env.UPLOAD_DIR || path.join(publicDir, 'uploads'));
+await mkdir(path.dirname(dbPath),{recursive:true});
+const db = new DatabaseSync(dbPath);
 db.exec('PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;');
 initializeCoreSchema(db);
 applyMigrations(db);
@@ -248,8 +251,8 @@ async function uploadMedia(admin,b) {
  if(bytes.length>5*1024*1024||bytes.length===0)fail(413,'Image must be 5 MB or smaller');
  if(!validImage(bytes,mimeType))fail(400,'Image content does not match its type');
  const name=`${randomBytes(20).toString('hex')}${type.ext}`,url=`/uploads/${name}`;
- const dir=path.join(publicDir,'uploads'),file=path.join(dir,name);
- await mkdir(dir,{recursive:true});
+ const file=path.join(uploadDir,name);
+ await mkdir(uploadDir,{recursive:true});
  await writeFile(file,bytes,{flag:'wx',mode:0o600});
  try{audit(admin,'upload','media',null,null,{url,mime_type:mimeType,size:bytes.length});}
  catch(e){await rm(file,{force:true});throw e;}
@@ -594,11 +597,18 @@ async function staticFile(req,res,url) {
  if(req.method!=='GET'&&req.method!=='HEAD')fail(405,'Method not allowed');
  let pathname;try{pathname=decodeURIComponent(url.pathname);}catch{fail(400,'Invalid path');}
  if(pathname.includes('\0')||pathname.includes('\\'))fail(400,'Invalid path');
- const candidate=path.resolve(publicDir,`.${pathname}`);
- if(candidate!==publicDir&&!candidate.startsWith(publicDir+path.sep))fail(403,'Forbidden');
- let file=candidate;
- try{if(!(await stat(file)).isFile())throw new Error('Not a file');}
- catch{if(path.extname(pathname)||pathname.startsWith('/uploads/')||pathname.startsWith('/demo-media/'))fail(404,'File not found');file=path.join(publicDir,'index.html');}
+ let file;
+ if(pathname.startsWith('/uploads/')){
+  file=path.resolve(uploadDir,pathname.slice('/uploads/'.length));
+  if(file===uploadDir||!file.startsWith(uploadDir+path.sep))fail(403,'Forbidden');
+  try{if(!(await stat(file)).isFile())throw new Error('Not a file');}catch{fail(404,'File not found');}
+ }else{
+  const candidate=path.resolve(publicDir,`.${pathname}`);
+  if(candidate!==publicDir&&!candidate.startsWith(publicDir+path.sep))fail(403,'Forbidden');
+  file=candidate;
+  try{if(!(await stat(file)).isFile())throw new Error('Not a file');}
+  catch{if(path.extname(pathname)||pathname.startsWith('/demo-media/'))fail(404,'File not found');file=path.join(publicDir,'index.html');}
+ }
  try{const bytes=await readFile(file);res.writeHead(200,{'Content-Type':mime[path.extname(file)]||'application/octet-stream','X-Content-Type-Options':'nosniff'});res.end(req.method==='HEAD'?undefined:bytes);}
  catch{fail(404,'Page not found');}
 }
@@ -606,7 +616,14 @@ const server=http.createServer(async(req,res)=>{
  try {
   const url=new URL(req.url,'http://localhost');
   if(process.env.CORS_ORIGIN){res.setHeader('Access-Control-Allow-Origin',process.env.CORS_ORIGIN);res.setHeader('Access-Control-Allow-Headers','Content-Type, Authorization');res.setHeader('Access-Control-Allow-Methods','GET,POST,PUT,DELETE,OPTIONS');if(req.method==='OPTIONS'){res.writeHead(204);return res.end();}}
-  if(url.pathname.startsWith('/api/'))await api(req,res,url);else await staticFile(req,res,url);
+  if(req.method==='GET'&&url.pathname==='/health')respond(res,200,{status:'ok'});
+  else if(url.pathname.startsWith('/api/'))await api(req,res,url);else await staticFile(req,res,url);
  }catch(e){if(e instanceof ApiError)respond(res,e.status,{error:e.message,...(e.details?{details:e.details}:{})});else {console.error(e);respond(res,500,{error:'Internal server error'});}}
 });
 const port=Number(process.env.PORT||3000);server.listen(port,()=>console.log(`Hotel management listening on http://localhost:${port}`));
+let shuttingDown=false;
+for(const signal of ['SIGTERM','SIGINT'])process.on(signal,()=>{
+ if(shuttingDown)return;shuttingDown=true;console.log(`Received ${signal}; closing server and SQLite cleanly.`);
+ const timer=setTimeout(()=>process.exit(1),10000);timer.unref();
+ server.close(()=>{try{db.close();}finally{clearTimeout(timer);process.exit(0);}});
+});
