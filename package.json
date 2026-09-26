@@ -10,7 +10,7 @@
     "start": "node server/index.js",
     "dev": "node --watch server/index.js",
     "check": "node --check server/index.js && node --check public/app.js",
-    "test": "node --test server/test.js server/seed.test.js",
+    "test": "node --test server/test.js server/seed.test.js server/security.test.js server/migration.test.js server/time.test.js public/app.test.js",
     "migrate:status": "node server/migrate.js status",
     "migrate:up": "node server/migrate.js up",
     "migrate:down": "node server/migrate.js down",

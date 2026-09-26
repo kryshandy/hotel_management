@@ -5,104 +5,14 @@ import { readFile, stat, mkdir, writeFile, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { applyMigrations } from './migrations.js';
+import { initializeCoreSchema } from './schema.js';
+import { localDateTimeToEpoch } from './time.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const publicDir = path.join(root, 'public');
 const db = new DatabaseSync(process.env.DB_PATH || path.join(root, 'hotel.sqlite'));
 db.exec('PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;');
-db.exec(`
-CREATE TABLE IF NOT EXISTS settings (
- id INTEGER PRIMARY KEY CHECK(id=1), hotel_name TEXT NOT NULL DEFAULT '', tagline TEXT NOT NULL DEFAULT '',
- description TEXT NOT NULL DEFAULT '', logo_url TEXT NOT NULL DEFAULT '', hero_image_url TEXT NOT NULL DEFAULT '',
- primary_color TEXT NOT NULL DEFAULT '#18314a', accent_color TEXT NOT NULL DEFAULT '#bce4e7',
- contact_email TEXT NOT NULL DEFAULT '', contact_phone TEXT NOT NULL DEFAULT '', address TEXT NOT NULL DEFAULT '',
- city TEXT NOT NULL DEFAULT '', country TEXT NOT NULL DEFAULT '', currency TEXT NOT NULL DEFAULT 'USD',
- timezone TEXT NOT NULL DEFAULT 'UTC', check_in_time TEXT NOT NULL DEFAULT '15:00',
- check_out_time TEXT NOT NULL DEFAULT '11:00', policies TEXT NOT NULL DEFAULT '', about TEXT NOT NULL DEFAULT '',
- footer_text TEXT NOT NULL DEFAULT '', nav_stays_label TEXT NOT NULL DEFAULT '',
- nav_about_label TEXT NOT NULL DEFAULT '', nav_contact_label TEXT NOT NULL DEFAULT '',
- stays_heading TEXT NOT NULL DEFAULT '', stays_intro TEXT NOT NULL DEFAULT '',
- about_heading TEXT NOT NULL DEFAULT '', search_heading TEXT NOT NULL DEFAULT '',
- booking_intro TEXT NOT NULL DEFAULT '', show_about INTEGER NOT NULL DEFAULT 1 CHECK(show_about IN (0,1)),
- show_contact INTEGER NOT NULL DEFAULT 1 CHECK(show_contact IN (0,1)),
- booking_enabled INTEGER NOT NULL DEFAULT 1 CHECK(booking_enabled IN (0,1)),
- demo_mode INTEGER NOT NULL DEFAULT 0 CHECK(demo_mode IN (0,1))
-);
-INSERT OR IGNORE INTO settings(id) VALUES(1);
-CREATE TABLE IF NOT EXISTS admins (
- id INTEGER PRIMARY KEY, email TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL,
- created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-CREATE TABLE IF NOT EXISTS sessions (
- token_hash TEXT PRIMARY KEY, admin_id INTEGER NOT NULL REFERENCES admins(id) ON DELETE CASCADE,
- expires_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS accommodation_types (
- id INTEGER PRIMARY KEY, slug TEXT NOT NULL UNIQUE, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '',
- bed_summary TEXT NOT NULL DEFAULT '', max_adults INTEGER NOT NULL DEFAULT 2 CHECK(max_adults>=1),
- max_children INTEGER NOT NULL DEFAULT 0 CHECK(max_children>=0),
- max_guests INTEGER NOT NULL DEFAULT 2 CHECK(max_guests>=1), size_sqm REAL,
- amenities TEXT NOT NULL DEFAULT '[]', image_url TEXT NOT NULL DEFAULT '', images TEXT NOT NULL DEFAULT '[]',
- active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0,1)), sort_order INTEGER NOT NULL DEFAULT 0
-);
-CREATE TABLE IF NOT EXISTS rooms (
- id INTEGER PRIMARY KEY, type_id INTEGER NOT NULL REFERENCES accommodation_types(id) ON DELETE RESTRICT,
- number TEXT NOT NULL UNIQUE, floor TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'active'
- CHECK(status IN ('active','maintenance','inactive')), notes TEXT NOT NULL DEFAULT ''
-);
-CREATE TABLE IF NOT EXISTS rates (
- id INTEGER PRIMARY KEY, type_id INTEGER NOT NULL REFERENCES accommodation_types(id) ON DELETE CASCADE,
- start_date TEXT NOT NULL, end_date TEXT NOT NULL, nightly_price REAL NOT NULL CHECK(nightly_price>=0),
- min_nights INTEGER NOT NULL DEFAULT 1 CHECK(min_nights>=1), CHECK(start_date<end_date)
-);
-CREATE TABLE IF NOT EXISTS blocks (
- id INTEGER PRIMARY KEY, room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
- start_date TEXT NOT NULL, end_date TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '', CHECK(start_date<end_date)
-);
-CREATE TABLE IF NOT EXISTS services (
- id INTEGER PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', category TEXT NOT NULL DEFAULT '',
- active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0,1)), sort_order INTEGER NOT NULL DEFAULT 0
-);
-CREATE TABLE IF NOT EXISTS guests (
- id INTEGER PRIMARY KEY, name TEXT NOT NULL, email TEXT NOT NULL, phone TEXT NOT NULL DEFAULT '',
- created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-CREATE TABLE IF NOT EXISTS reservations (
- id INTEGER PRIMARY KEY, reference TEXT NOT NULL UNIQUE, token_hash TEXT NOT NULL UNIQUE,
- type_id INTEGER NOT NULL REFERENCES accommodation_types(id) ON DELETE RESTRICT,
- room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE RESTRICT,
- guest_id INTEGER NOT NULL REFERENCES guests(id) ON DELETE RESTRICT,
- check_in TEXT NOT NULL, check_out TEXT NOT NULL, adults INTEGER NOT NULL, children INTEGER NOT NULL DEFAULT 0,
- status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','confirmed','checked_in','checked_out','cancelled','no_show')),
- quoted_total REAL NOT NULL, notes TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
- updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, CHECK(check_in<check_out)
-);
-CREATE TABLE IF NOT EXISTS service_requests (
- id INTEGER PRIMARY KEY, reservation_id INTEGER NOT NULL REFERENCES reservations(id) ON DELETE CASCADE,
- service_id INTEGER REFERENCES services(id) ON DELETE SET NULL,
- title TEXT NOT NULL, message TEXT NOT NULL DEFAULT '',
- status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open','in_progress','completed','cancelled')),
- created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-CREATE TABLE IF NOT EXISTS audit_log (
- id INTEGER PRIMARY KEY, admin_id INTEGER NOT NULL REFERENCES admins(id) ON DELETE RESTRICT,
- action TEXT NOT NULL, entity TEXT NOT NULL, entity_id INTEGER,
- before_json TEXT, after_json TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-CREATE INDEX IF NOT EXISTS idx_reservation_overlap ON reservations(room_id,check_in,check_out,status);
-CREATE INDEX IF NOT EXISTS idx_block_overlap ON blocks(room_id,start_date,end_date);
-CREATE INDEX IF NOT EXISTS idx_rate_dates ON rates(type_id,start_date,end_date);
-`);
-const additionalSettings={
- nav_stays_label:"TEXT NOT NULL DEFAULT ''",nav_about_label:"TEXT NOT NULL DEFAULT ''",
- nav_contact_label:"TEXT NOT NULL DEFAULT ''",stays_heading:"TEXT NOT NULL DEFAULT ''",
- stays_intro:"TEXT NOT NULL DEFAULT ''",about_heading:"TEXT NOT NULL DEFAULT ''",
- search_heading:"TEXT NOT NULL DEFAULT ''",booking_intro:"TEXT NOT NULL DEFAULT ''",
- show_about:'INTEGER NOT NULL DEFAULT 1',show_contact:'INTEGER NOT NULL DEFAULT 1',
- booking_enabled:'INTEGER NOT NULL DEFAULT 1',demo_mode:'INTEGER NOT NULL DEFAULT 0'
-};
-const knownSettings=new Set(db.prepare('PRAGMA table_info(settings)').all().map(x=>x.name));
-for(const [name,definition] of Object.entries(additionalSettings))if(!knownSettings.has(name))db.exec(`ALTER TABLE settings ADD COLUMN ${name} ${definition}`);
+initializeCoreSchema(db);
 applyMigrations(db);
 
 class ApiError extends Error { constructor(status, message, details) { super(message); this.status = status; this.details = details; } }
@@ -150,6 +60,11 @@ const date = (v, field) => {
  if (typeof v !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(v) || Number.isNaN(Date.parse(`${v}T00:00:00Z`)) || new Date(`${v}T00:00:00Z`).toISOString().slice(0,10)!==v) fail(400, `Invalid ${field}`);
  return v;
 };
+const dateTime = (v,field) => {
+ if(typeof v!=='string'||!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:\d{2})?$/.test(v))fail(400,`Invalid ${field}`);
+ const parsed=Date.parse(/[Z+-]\d{0,2}:?\d{0,2}$/.test(v)?v:`${v}Z`);if(Number.isNaN(parsed))fail(400,`Invalid ${field}`);
+ return v;
+};
 const dates = (a,b,maxNights=365) => {
  const start=date(a,'start date'), end=date(b,'end date');
  const nights=(Date.parse(`${end}T00:00:00Z`)-Date.parse(`${start}T00:00:00Z`))/86400000;
@@ -166,9 +81,18 @@ const jsonArray = (v,field) => {
  if (!Array.isArray(v) || v.length>30 || v.some(x=>typeof x!=='string'||x.length>300)) fail(400,`Invalid ${field}`);
  return JSON.stringify(v.map(x=>x.trim()));
 };
+const webUrl = (v,field,{allowRelative=true}={}) => {
+ const value=text(v??'',field,2000);
+ if(!value)return '';
+ if(allowRelative&&value.startsWith('/')&&!value.startsWith('//')&&!value.includes('\\'))return value;
+ let parsed;try{parsed=new URL(value);}catch{fail(400,`Invalid ${field}`);}
+ if(!['http:','https:'].includes(parsed.protocol)||parsed.username||parsed.password)fail(400,`Invalid ${field}`);
+ return value;
+};
 const exposeType = x => x && ({...x,active:bool(x.active),amenities:JSON.parse(x.amenities),images:JSON.parse(x.images)});
 const exposeService = x => x && ({...x,active:bool(x.active)});
 const exposeReservation = x => x && ({...x,token_hash:undefined,guest_name:x.guest_name,guest_email:x.guest_email,guest_phone:x.guest_phone});
+const exposePublicRequest = x => x && ({id:x.id,service_id:x.service_id,title:x.title,message:x.message,status:x.status,created_at:x.created_at,updated_at:x.updated_at,service_name:x.service_name});
 const reservations = () => all(`SELECT r.*,g.name guest_name,g.email guest_email,g.phone guest_phone,t.name type_name,rm.number room_number
  FROM reservations r JOIN guests g ON g.id=r.guest_id JOIN accommodation_types t ON t.id=r.type_id JOIN rooms rm ON rm.id=r.room_id ORDER BY r.created_at DESC,r.id DESC`).map(exposeReservation);
 const requests = () => all(`SELECT sr.*,s.name service_name,r.reference reservation_reference,rm.number room_number
@@ -214,7 +138,7 @@ function requireAdmin(req) {const user=currentUser(req);if(!user)fail(401,'Sign 
 function requireLeadership(admin){if(!['owner','manager'].includes(admin.role))fail(403,'Leadership access required');}
 function requireRoles(admin,roles){if(!['owner','manager'].includes(admin.role)&&!roles.includes(admin.role))fail(403,'Your role cannot perform this action');}
 const publicSite = () => ({settings:settings(),features:features(),bookingRules:bookingRules(),types:all('SELECT * FROM accommodation_types WHERE active=1 ORDER BY sort_order,id').map(exposeType),services:featureOn('service_catalog')?all('SELECT * FROM services WHERE active=1 ORDER BY sort_order,id').map(exposeService):[],sections:all('SELECT * FROM content_sections WHERE enabled=1 ORDER BY sort_order,id').map(x=>({...x,enabled:bool(x.enabled)})),setupRequired:!one('SELECT id FROM admins LIMIT 1'),setupKeyRequired:!!process.env.ADMIN_SETUP_KEY});
-const adminState = () => {
+const adminState = admin => {
  const types=all('SELECT * FROM accommodation_types ORDER BY sort_order,id').map(exposeType);
  const rooms=all('SELECT rm.*,t.name type_name FROM rooms rm JOIN accommodation_types t ON t.id=rm.type_id ORDER BY rm.number,rm.id');
  const rates=all('SELECT ra.*,t.name type_name FROM rates ra JOIN accommodation_types t ON t.id=ra.type_id ORDER BY ra.start_date DESC,ra.id DESC');
@@ -227,13 +151,30 @@ const adminState = () => {
  const preferences=all(`SELECT p.*,g.name guest_name,g.email guest_email FROM guest_preferences p JOIN guests g ON g.id=p.guest_id ORDER BY p.updated_at DESC,p.id DESC`).map(x=>({...x,active:bool(x.active)}));
  const sections=all('SELECT * FROM content_sections ORDER BY sort_order,id').map(x=>({...x,enabled:bool(x.enabled)}));
  const staff=all('SELECT id,email,display_name,role,active,created_at FROM admins ORDER BY active DESC,display_name,email').map(x=>({...x,active:bool(x.active)}));
- return {settings:settings(),features:featureCatalog(),bookingRules:bookingRules(),types,rooms,rates,blocks,services,reservations:res,requests:req,guests,departments,housekeeping,maintenance,preferences,sections,staff,
+ const state={settings:settings(),features:featureCatalog(),bookingRules:bookingRules(),types,rooms,rates,blocks,services,reservations:res,requests:req,guests,departments,housekeeping,maintenance,preferences,sections,staff,
    overview:{types:types.length,rooms:rooms.length,active_rooms:rooms.filter(x=>x.status==='active').length,
     reservations:res.length,pending_reservations:res.filter(x=>x.status==='pending').length,
     checked_in:res.filter(x=>x.status==='checked_in').length,open_requests:req.filter(x=>x.status==='open'||x.status==='in_progress').length,
     rooms_to_service:housekeeping.filter(x=>!['completed','cancelled'].includes(x.status)).length,
     open_maintenance:maintenance.filter(x=>!['resolved','cancelled'].includes(x.status)).length,
     vip_preferences:preferences.filter(x=>x.active).length}};
+ if(!admin||['owner','manager'].includes(admin.role))return state;
+ const role=admin.role;
+ const fullGuestAccess=['front_office','concierge'].includes(role);
+ state.staff=[];
+ state.guests=fullGuestAccess?guests:[];
+ state.preferences=fullGuestAccess?preferences.filter(x=>x.sensitivity!=='private'):[];
+ state.requests=fullGuestAccess?req:[];
+ state.departments=fullGuestAccess?departments:[];
+ state.services=role==='concierge'?services:[];
+ state.rates=role==='revenue'?rates:[];
+ state.sections=role==='revenue'?sections:[];
+ state.housekeeping=['front_office','housekeeping'].includes(role)?housekeeping:[];
+ state.maintenance=['front_office','engineering'].includes(role)?maintenance:maintenance.map(x=>({id:x.id,room_id:x.room_id,status:x.status,out_of_order:x.out_of_order,title:'Engineering hold'}));
+ state.blocks=['front_office','revenue'].includes(role)?blocks:blocks.map(x=>({id:x.id,room_id:x.room_id,start_date:x.start_date,end_date:x.end_date,reason:''}));
+ state.rooms=rooms.map(x=>role==='revenue'?x:{...x,notes:''});
+ if(!fullGuestAccess)state.reservations=res.map(x=>({...x,guest_id:undefined,guest_name:undefined,guest_email:undefined,guest_phone:undefined,notes:undefined}));
+ return state;
 };
 function respond(res,status,data,extra={}) {res.writeHead(status,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store',...extra});res.end(JSON.stringify(data));}
 async function body(req,maxBytes=1024*1024) {
@@ -337,8 +278,9 @@ function normalize(entity,b,existing={}) {
   out.max_children=integer(x.max_children??0,'max_children',0,30);out.max_guests=integer(x.max_guests??out.max_adults,'max_guests',1,40);
   if(out.max_guests<out.max_adults)fail(400,'max_guests must fit max_adults');
   out.size_sqm=x.size_sqm==null?null:decimal(x.size_sqm,'size_sqm',0,100000);
-  out.amenities=jsonArray(x.amenities??[],'amenities');out.image_url=text(x.image_url??'','image_url',2000);
-  out.images=jsonArray(x.images??[],'images');out.active=bool(x.active??true)?1:0;out.sort_order=integer(x.sort_order??0,'sort_order',-10000,10000);
+  out.amenities=jsonArray(x.amenities??[],'amenities');out.image_url=webUrl(x.image_url??'','image_url');
+  const images=x.images??[];if(!Array.isArray(images)||images.length>30)fail(400,'Invalid images');
+  out.images=JSON.stringify(images.map(value=>webUrl(value,'images')));out.active=boolean(x.active??true,'active');out.sort_order=integer(x.sort_order??0,'sort_order',-10000,10000);
  }
  if(entity==='rooms') {
   out.type_id=id(x.type_id);if(!row('accommodation_types',out.type_id))fail(400,'Unknown accommodation type');
@@ -365,13 +307,13 @@ function normalize(entity,b,existing={}) {
  }
  if(entity==='services') {
   out.name=text(x.name,'name',120,true);out.description=text(x.description??'','description',3000);
-  out.category=text(x.category??'','category',100);out.active=bool(x.active??true)?1:0;
+  out.category=text(x.category??'','category',100);out.active=boolean(x.active??true,'active');
   out.sort_order=integer(x.sort_order??0,'sort_order',-10000,10000);
  }
  if(entity==='departments') {
   out.name=text(x.name,'name',120,true);out.color=text(x.color??'#315f5a','color',7,true);
   if(!/^#[0-9a-fA-F]{6}$/.test(out.color))fail(400,'Invalid color');
-  out.active=bool(x.active??true)?1:0;out.sort_order=integer(x.sort_order??0,'sort_order',-10000,10000);
+  out.active=boolean(x.active??true,'active');out.sort_order=integer(x.sort_order??0,'sort_order',-10000,10000);
  }
  if(entity==='housekeeping') {
   out.room_id=id(x.room_id);if(!row('rooms',out.room_id))fail(400,'Unknown room');
@@ -386,7 +328,7 @@ function normalize(entity,b,existing={}) {
   out.title=text(x.title,'title',160,true);out.description=text(x.description??'','description',5000);
   out.priority=text(x.priority??'normal','priority',20,true);if(!['low','normal','high','critical'].includes(out.priority))fail(400,'Invalid priority');
   out.status=text(x.status??'open','status',30,true);if(!['open','assigned','in_progress','on_hold','resolved','cancelled'].includes(out.status))fail(400,'Invalid status');
-  out.out_of_order=bool(x.out_of_order??false)?1:0;out.assigned_to=text(x.assigned_to??'','assigned to',160);
+  out.out_of_order=boolean(x.out_of_order??false,'out_of_order');out.assigned_to=text(x.assigned_to??'','assigned to',160);
   out.due_at=x.due_at?date(x.due_at,'due date'):null;
   out.resolved_at=out.status==='resolved'?(existing.resolved_at||new Date().toISOString()):null;
  }
@@ -394,15 +336,15 @@ function normalize(entity,b,existing={}) {
   out.guest_id=id(x.guest_id);if(!row('guests',out.guest_id))fail(400,'Unknown guest');
   out.category=text(x.category,'category',100,true);out.preference=text(x.preference,'preference',1000,true);
   out.sensitivity=text(x.sensitivity??'standard','sensitivity',20,true);if(!['standard','private'].includes(out.sensitivity))fail(400,'Invalid sensitivity');
-  out.active=bool(x.active??true)?1:0;
+  out.active=boolean(x.active??true,'active');
  }
  if(entity==='sections') {
   out.section_key=text(x.section_key,'section key',100,true).toLowerCase();if(!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(out.section_key))fail(400,'Invalid section key');
   out.nav_label=text(x.nav_label??'','navigation label',80);out.eyebrow=text(x.eyebrow??'','eyebrow',120);
-  out.heading=text(x.heading,'heading',200,true);out.body=text(x.body??'','body',10000);out.image_url=text(x.image_url??'','image URL',2000);
-  out.cta_label=text(x.cta_label??'','CTA label',100);out.cta_url=text(x.cta_url??'','CTA URL',2000);
+  out.heading=text(x.heading,'heading',200,true);out.body=text(x.body??'','body',10000);out.image_url=webUrl(x.image_url??'','image URL');
+  out.cta_label=text(x.cta_label??'','CTA label',100);out.cta_url=webUrl(x.cta_url??'','CTA URL');
   out.layout=text(x.layout??'editorial','layout',30,true);if(!['editorial','feature','split','quote'].includes(out.layout))fail(400,'Invalid layout');
-  out.enabled=bool(x.enabled??true)?1:0;out.sort_order=integer(x.sort_order??0,'sort_order',-10000,10000);
+  out.enabled=boolean(x.enabled??true,'enabled');out.sort_order=integer(x.sort_order??0,'sort_order',-10000,10000);
  }
  return out;
 }
@@ -426,10 +368,13 @@ function updateSettings(b) {
  const old=settings(), data={};
  for(const [k,v] of Object.entries(b)) {
   if(k==='id'||!(k in old))fail(400,`Unknown field ${k}`);
-  data[k]=['show_about','show_contact','booking_enabled','demo_mode'].includes(k)?boolean(v,k):text(v,k,k==='description'||k==='policies'||k==='about'?10000:2000);
+  if(['show_about','show_contact','booking_enabled','demo_mode'].includes(k))data[k]=boolean(v,k);
+  else if(['logo_url','hero_image_url'].includes(k))data[k]=webUrl(v,k);
+  else data[k]=text(v,k,k==='description'||k==='policies'||k==='about'?10000:2000,k==='hotel_name');
  }
  for(const k of ['primary_color','accent_color']) if(k in data&&!/^#[0-9a-fA-F]{6}$/.test(data[k]))fail(400,`Invalid ${k}`);
  if('currency' in data&&!/^[A-Z]{3}$/.test(data.currency))fail(400,'Invalid currency');
+ if('contact_email' in data&&data.contact_email&&!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(data.contact_email))fail(400,'Invalid contact_email');
  if('timezone' in data){try{new Intl.DateTimeFormat('en',{timeZone:data.timezone});}catch{fail(400,'Invalid timezone');}}
  for(const k of ['check_in_time','check_out_time'])if(k in data&&!/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(data[k]))fail(400,`Invalid ${k}`);
  if((data.demo_mode??old.demo_mode) && (data.booking_enabled??old.booking_enabled))fail(400,'Turn off demo mode before enabling reservations');
@@ -442,7 +387,7 @@ function updateBookingRules(b) {
  for(const [k,v] of Object.entries(b)) {
   if(k in numeric)data[k]=integer(v,k,numeric[k][0],numeric[k][1]);
   else if(['require_phone','allow_children','allow_special_requests','auto_confirm'].includes(k))data[k]=boolean(v,k);
-  else if(k==='terms_url')data[k]=text(v,k,2000);
+  else if(k==='terms_url')data[k]=webUrl(v,k);
   else fail(400,`Unknown field ${k}`);
  }
  const keys=Object.keys(data);if(keys.length)run(`UPDATE booking_rules SET ${keys.map(k=>`${k}=?`).join(',')} WHERE id=1`,...keys.map(k=>data[k]));
@@ -450,7 +395,7 @@ function updateBookingRules(b) {
 }
 function checkLeadTime(start,rules) {
  const settingsValue=settings(),checkInTime=settingsValue.check_in_time||'15:00';
- const target=Date.parse(`${start}T${checkInTime}:00Z`);
+ const target=localDateTimeToEpoch(start,checkInTime,settingsValue.timezone);
  const now=Date.now();
  if(target-now<rules.minimum_lead_hours*3600000)fail(400,`Reservations require at least ${rules.minimum_lead_hours} hours notice`);
 }
@@ -515,7 +460,7 @@ async function api(req,res,url) {
  }
  if(method==='POST'&&p==='/api/public/reservations'){limit(req,res,'reservation',12);return respond(res,201,reserve(await body(req)));}
  let m=p.match(/^\/api\/public\/reservations\/([A-Za-z0-9_-]+)$/);
- if(method==='GET'&&m){const x=reservationByToken(m[1]);if(!x)fail(404,'Reservation not found');return respond(res,200,{reservation:exposeReservation(x),requests:all('SELECT sr.*,s.name service_name FROM service_requests sr LEFT JOIN services s ON s.id=sr.service_id WHERE sr.reservation_id=? ORDER BY sr.id DESC',x.id)});}
+ if(method==='GET'&&m){const x=reservationByToken(m[1]);if(!x)fail(404,'Reservation not found');return respond(res,200,{reservation:exposeReservation(x),requests:all('SELECT sr.id,sr.service_id,sr.title,sr.message,sr.status,sr.created_at,sr.updated_at,s.name service_name FROM service_requests sr LEFT JOIN services s ON s.id=sr.service_id WHERE sr.reservation_id=? ORDER BY sr.id DESC',x.id).map(exposePublicRequest)});}
  m=p.match(/^\/api\/public\/reservations\/([A-Za-z0-9_-]+)\/requests$/);
  if(method==='POST'&&m){limit(req,res,'service-request',30);return respond(res,201,{request:requestService(m[1],await body(req))});}
  if(method==='GET'&&p==='/api/admin/session')return respond(res,200,{user:currentUser(req),setupRequired:!one('SELECT id FROM admins LIMIT 1')});
@@ -540,13 +485,13 @@ async function api(req,res,url) {
   const admin=one('SELECT * FROM admins WHERE email=?',email);
   const [salt,stored]=(admin?.password_hash??'0:0').split(':');let valid=false;
   try{const actual=scryptSync(password,salt,64),expected=Buffer.from(stored,'hex');valid=actual.length===expected.length&&timingSafeEqual(actual,expected);}catch{}
-  if(!valid)fail(401,'Invalid credentials');return respond(res,200,createSession(admin));
+   if(!valid||!admin.active)fail(401,'Invalid credentials');return respond(res,200,createSession(admin));
  }
  if(method==='POST'&&p==='/api/admin/logout') {const value=bearer(req);if(value)run('DELETE FROM sessions WHERE token_hash=?',hash(value));return respond(res,200,{ok:true});}
  const admin=requireAdmin(req);
  if(method==='POST'&&p==='/api/admin/media'){requireRoles(admin,['revenue']);if(!featureOn('media_library'))fail(409,'Media uploads are disabled');return respond(res,201,await uploadMedia(admin,await body(req,7*1024*1024+1024)));}
- if(method==='GET'&&p==='/api/admin/state')return respond(res,200,adminState());
- if(method==='GET'&&p==='/api/admin/overview')return respond(res,200,adminState().overview);
+ if(method==='GET'&&p==='/api/admin/state')return respond(res,200,adminState(admin));
+ if(method==='GET'&&p==='/api/admin/overview')return respond(res,200,adminState(admin).overview);
  if(method==='GET'&&p==='/api/admin/audit'){requireLeadership(admin);return respond(res,200,{audit:all('SELECT a.id,a.action,a.entity,a.entity_id,a.before_json,a.after_json,a.created_at,u.email admin_email FROM audit_log a JOIN admins u ON u.id=a.admin_id ORDER BY a.id DESC LIMIT 200')});}
  if(method==='GET'&&p==='/api/admin/settings')return respond(res,200,settings());
  if(method==='PUT'&&p==='/api/admin/settings'){requireLeadership(admin);const b=await body(req);const after=atomic(()=>{const before=settings(),next=updateSettings(b);audit(admin,'update','settings',1,before,next);return next;});return respond(res,200,after);}
@@ -557,15 +502,18 @@ async function api(req,res,url) {
   requireLeadership(admin);const b=await body(req),email=text(b.email,'email',254,true).toLowerCase(),password=text(b.password,'password',200,true),displayName=text(b.display_name??'','display name',160);
   if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)||password.length<12)fail(400,'Valid email and password of at least 12 characters required');
   const role=text(b.role??'viewer','role',30,true);if(!['owner','manager','front_office','housekeeping','concierge','engineering','revenue','viewer'].includes(role))fail(400,'Invalid role');
+  if(admin.role!=='owner'&&role==='owner')fail(403,'Only an owner can grant owner access');
   const result=atomic(()=>{const salt=randomBytes(16).toString('hex'),digest=scryptSync(password,salt,64).toString('hex');let staffId;try{staffId=Number(run('INSERT INTO admins(email,password_hash,display_name,role) VALUES(?,?,?,?)',email,`${salt}:${digest}`,displayName,role).lastInsertRowid);}catch(e){if(e.message.includes('UNIQUE'))fail(409,'A staff account with this email already exists');throw e;}const next=one('SELECT id,email,display_name,role,active,created_at FROM admins WHERE id=?',staffId);audit(admin,'create','staff',staffId,null,next);return {...next,active:bool(next.active)};});return respond(res,201,result);
  }
  m=p.match(/^\/api\/admin\/staff\/(\d+)$/);
  if(method==='PUT'&&m){
   requireLeadership(admin);const staffId=id(m[1]),b=await body(req),before=one('SELECT id,email,display_name,role,active,created_at FROM admins WHERE id=?',staffId);if(!before)fail(404,'Staff account not found');const data={};
+  if(admin.role!=='owner'&&before.role==='owner')fail(403,'Only an owner can manage owner accounts');
   for(const [k,v] of Object.entries(b)){if(k==='display_name')data.display_name=text(v,'display name',160);else if(k==='role'){data.role=text(v,'role',30,true);if(!['owner','manager','front_office','housekeeping','concierge','engineering','revenue','viewer'].includes(data.role))fail(400,'Invalid role');}else if(k==='active')data.active=boolean(v,'active');else if(k==='password'){const password=text(v,'password',200,true);if(password.length<12)fail(400,'Password must be at least 12 characters');const salt=randomBytes(16).toString('hex');data.password_hash=`${salt}:${scryptSync(password,salt,64).toString('hex')}`;}else fail(400,`Unknown field ${k}`);}
+  if(admin.role!=='owner'&&data.role==='owner')fail(403,'Only an owner can grant owner access');
   if(staffId===admin.id&&(data.active===0||data.role&&!['owner','manager'].includes(data.role)))fail(409,'You cannot remove your own leadership access');
   if(before.role==='owner'&&(data.active===0||data.role&&data.role!=='owner')&&one("SELECT COUNT(*) count FROM admins WHERE role='owner' AND active=1 AND id!=?",staffId).count===0)fail(409,'At least one active owner is required');
-  const after=atomic(()=>{const keys=Object.keys(data);if(keys.length)run(`UPDATE admins SET ${keys.map(k=>`${k}=?`).join(',')} WHERE id=?`,...keys.map(k=>data[k]),staffId);if(data.active===0)run('DELETE FROM sessions WHERE admin_id=?',staffId);const next=one('SELECT id,email,display_name,role,active,created_at FROM admins WHERE id=?',staffId);audit(admin,'update','staff',staffId,before,next);return {...next,active:bool(next.active)};});return respond(res,200,after);
+  const after=atomic(()=>{const keys=Object.keys(data);if(keys.length)run(`UPDATE admins SET ${keys.map(k=>`${k}=?`).join(',')} WHERE id=?`,...keys.map(k=>data[k]),staffId);if(data.active===0||data.password_hash)run('DELETE FROM sessions WHERE admin_id=?',staffId);const next=one('SELECT id,email,display_name,role,active,created_at FROM admins WHERE id=?',staffId);audit(admin,'update','staff',staffId,before,next);return {...next,active:bool(next.active)};});return respond(res,200,after);
  }
  m=p.match(/^\/api\/admin\/guests\/(\d+)$/);
  if(method==='PUT'&&m) {
@@ -584,14 +532,19 @@ async function api(req,res,url) {
  m=p.match(/^\/api\/admin\/(types|rooms|rates|blocks|services|departments|housekeeping|maintenance|preferences|sections)(?:\/(\d+))?$/);
  if(m) {
    const entity=m[1],itemId=m[2]?id(m[2]):null,table=tables[entity];
-  if(method==='GET'&&!itemId){const xs=all(`SELECT * FROM ${table} ORDER BY id DESC`);return respond(res,200,{[entity]:xs.map(x=>entity==='types'?exposeType(x):entity==='services'?exposeService(x):x)});}
-  if(method==='GET'&&itemId){const x=row(table,itemId);if(!x)fail(404,'Record not found');return respond(res,200,entity==='types'?exposeType(x):entity==='services'?exposeService(x):x);}
    const permitted={types:['revenue'],rooms:['revenue'],rates:['revenue'],blocks:['revenue','front_office'],services:['concierge'],departments:[],housekeeping:['housekeeping','front_office'],maintenance:['engineering','front_office'],preferences:['front_office','concierge'],sections:['revenue']}[entity];
-   if(method==='POST'&&!itemId){requireRoles(admin,permitted);const b=await body(req);const after=atomic(()=>{const next=saveEntity(entity,b);audit(admin,'create',entity,next.id,null,next);return next;});return respond(res,201,after);}
-   if(method==='PUT'&&itemId){requireRoles(admin,permitted);const b=await body(req);const after=atomic(()=>{const before=row(table,itemId),next=saveEntity(entity,b,itemId);audit(admin,'update',entity,itemId,before,next);return next;});return respond(res,200,after);}
-   if(method==='DELETE'&&itemId){requireRoles(admin,permitted);atomic(()=>{const before=row(table,itemId);deleteEntity(entity,itemId);audit(admin,'delete',entity,itemId,before,null);});return respond(res,200,{ok:true});}
+   const restrictedPreference=b=>entity==='preferences'&&!['owner','manager'].includes(admin.role)&&(b?.sensitivity==='private'||itemId&&row(table,itemId)?.sensitivity==='private');
+   if(method==='GET'){
+    requireRoles(admin,permitted);
+    if(entity==='preferences'&&!['owner','manager'].includes(admin.role))fail(403,'Leadership access required for private preferences');
+    if(!itemId){const xs=all(`SELECT * FROM ${table} ORDER BY id DESC`);return respond(res,200,{[entity]:xs.map(x=>entity==='types'?exposeType(x):entity==='services'?exposeService(x):x)});}
+    const x=row(table,itemId);if(!x)fail(404,'Record not found');return respond(res,200,entity==='types'?exposeType(x):entity==='services'?exposeService(x):x);
+   }
+   if(method==='POST'&&!itemId){requireRoles(admin,permitted);const b=await body(req);if(restrictedPreference(b))fail(403,'Private preferences require leadership access');const after=atomic(()=>{const next=saveEntity(entity,b);audit(admin,'create',entity,next.id,null,next);return next;});return respond(res,201,after);}
+   if(method==='PUT'&&itemId){requireRoles(admin,permitted);const b=await body(req);if(restrictedPreference(b))fail(403,'Private preferences require leadership access');const after=atomic(()=>{const before=row(table,itemId),next=saveEntity(entity,b,itemId);audit(admin,'update',entity,itemId,before,next);return next;});return respond(res,200,after);}
+   if(method==='DELETE'&&itemId){requireRoles(admin,permitted);if(restrictedPreference())fail(403,'Private preferences require leadership access');atomic(()=>{const before=row(table,itemId);deleteEntity(entity,itemId);audit(admin,'delete',entity,itemId,before,null);});return respond(res,200,{ok:true});}
  }
- if(method==='GET'&&p==='/api/admin/reservations')return respond(res,200,{reservations:reservations()});
+ if(method==='GET'&&p==='/api/admin/reservations'){requireRoles(admin,['front_office','concierge']);return respond(res,200,{reservations:adminState(admin).reservations});}
  m=p.match(/^\/api\/admin\/reservations\/(\d+)$/);
  if(method==='PUT'&&m) {
    requireRoles(admin,['front_office']);
@@ -613,7 +566,7 @@ async function api(req,res,url) {
     const keys=Object.keys(data);run(`UPDATE reservations SET ${keys.map(k=>`${k}=?`).join(',')},updated_at=CURRENT_TIMESTAMP WHERE id=?`,...keys.map(k=>data[k]),itemId);
     const next=reservations().find(y=>y.id===itemId);audit(admin,'update','reservation',itemId,x,next);return next;});return respond(res,200,{reservation:after});
  }
- if(method==='GET'&&p==='/api/admin/requests')return respond(res,200,{requests:requests()});
+ if(method==='GET'&&p==='/api/admin/requests'){requireRoles(admin,['front_office','concierge']);return respond(res,200,{requests:requests()});}
  m=p.match(/^\/api\/admin\/requests\/(\d+)$/);
  if(method==='PUT'&&m) {
    requireRoles(admin,['front_office','concierge']);
@@ -624,12 +577,13 @@ async function api(req,res,url) {
     else if(k==='priority'){data.priority=text(v,'priority',20,true);if(!['low','normal','high','urgent'].includes(data.priority))fail(400,'Invalid priority');}
     else if(k==='department_id'){data.department_id=v==null?null:id(v);if(data.department_id&&!row('departments',data.department_id))fail(400,'Unknown department');}
     else if(k==='assigned_to')data.assigned_to=text(v,'assigned to',160);
-    else if(k==='requested_for')data.requested_for=v?text(v,'requested for',40):null;
+    else if(k==='requested_for')data.requested_for=v?dateTime(v,'requested for'):null;
     else if(k==='internal_notes')data.internal_notes=text(v,'internal notes',3000);
     else fail(400,`Unknown field ${k}`);
    }
    if(!Object.keys(data).length)fail(400,'No changes supplied');
-   if(data.status==='completed')data.completed_at=new Date().toISOString();
+   if(data.status==='completed')data.completed_at=x.completed_at||new Date().toISOString();
+   else if('status' in data)data.completed_at=null;
    const after=atomic(()=>{const keys=Object.keys(data);run(`UPDATE service_requests SET ${keys.map(k=>`${k}=?`).join(',')},updated_at=CURRENT_TIMESTAMP WHERE id=?`,...keys.map(k=>data[k]),itemId);
     const next=requests().find(y=>y.id===itemId);audit(admin,'status','service_request',itemId,x,next);return next;});return respond(res,200,{request:after});
  }
@@ -643,7 +597,8 @@ async function staticFile(req,res,url) {
  const candidate=path.resolve(publicDir,`.${pathname}`);
  if(candidate!==publicDir&&!candidate.startsWith(publicDir+path.sep))fail(403,'Forbidden');
  let file=candidate;
- try{if(!(await stat(file)).isFile())file=path.join(publicDir,'index.html');}catch{file=path.join(publicDir,'index.html');}
+ try{if(!(await stat(file)).isFile())throw new Error('Not a file');}
+ catch{if(path.extname(pathname)||pathname.startsWith('/uploads/')||pathname.startsWith('/demo-media/'))fail(404,'File not found');file=path.join(publicDir,'index.html');}
  try{const bytes=await readFile(file);res.writeHead(200,{'Content-Type':mime[path.extname(file)]||'application/octet-stream','X-Content-Type-Options':'nosniff'});res.end(req.method==='HEAD'?undefined:bytes);}
  catch{fail(404,'Page not found');}
 }
